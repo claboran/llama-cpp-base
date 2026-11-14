@@ -1,0 +1,86 @@
+# llama.cpp services on top of the llama-cpp base image.
+#   docker compose --profile chat up -d
+#   docker compose --profile embed up -d
+#   docker compose --profile all up -d
+# Inside the container llama-server always listens on 0.0.0.0:8080; the host side is set
+# by *_BIND / *_PORT (default: all interfaces, chat 8099, embeddings 8901).
+# Settings come from .env (copy .env.example).
+# Note: llama-server does not accept --opt=value; keep option and value as separate items.
+
+x-build: &build
+  context: .
+  target: server
+  args:
+    LLAMA_CPP_REF: ${LLAMA_CPP_REF:-v1.0.0}
+    CUDA_VERSION: ${CUDA_VERSION:-13.0.3}
+    CUDA_ARCHS: ${CUDA_ARCHS:-121}
+
+x-llama: &llama
+  image: llama-cpp-server:${LLAMA_CPP_REF:-v1.0.0}-cuda${CUDA_VERSION:-13.0.3}
+  build: *build
+  gpus: all
+  restart: unless-stopped
+  volumes:
+    - ${MODELS_DIR:-./models}:/models:ro
+  ulimits:
+    memlock: -1
+  environment:
+    # Bearer token(s) for the API, comma-separated. Empty = no authentication.
+    LLAMA_API_KEY: ${API_KEY:-}
+    # Allowed CORS origins for browsers ("*" = any, "localhost" = same-origin only)
+    LLAMA_ARG_CORS_ORIGINS: ${CORS_ORIGINS:-*}
+
+services:
+  llm-chat:
+    <<: *llama
+    profiles: [chat, all]
+    ports:
+      - "${CHAT_BIND:-0.0.0.0}:${CHAT_PORT:-8099}:8080"
+    command:
+      - --model
+      - "/models/${CHAT_MODEL:-google_gemma-4-26B-A4B-it-Q4_K_M.gguf}"
+      - --alias
+      - "${CHAT_ALIAS:-gemma-4-26b-a4b}"
+      - --ctx-size
+      - "${CHAT_CTX:-65536}"
+      - --parallel
+      - "${CHAT_PARALLEL:-1}"
+      - --n-gpu-layers
+      - "999"
+      - --flash-attn
+      - "on"
+      - --cache-type-k
+      - "${CHAT_CACHE_TYPE:-f16}"
+      - --cache-type-v
+      - "${CHAT_CACHE_TYPE:-f16}"
+      - --jinja
+      - --metrics
+      - --port
+      - "8080"
+
+  llm-embed:
+    <<: *llama
+    profiles: [embed, all]
+    ports:
+      - "${EMBED_BIND:-0.0.0.0}:${EMBED_PORT:-8901}:8080"
+    command:
+      - --model
+      - "/models/${EMBED_MODEL:-bge-m3-q8_0.gguf}"
+      - --alias
+      - "${EMBED_ALIAS:-bge-m3}"
+      - --embeddings
+      - --pooling
+      - "cls"
+      - --ctx-size
+      - "${EMBED_CTX:-8192}"
+      - --batch-size
+      - "${EMBED_CTX:-8192}"
+      - --ubatch-size
+      - "${EMBED_CTX:-8192}"
+      - --parallel
+      - "${EMBED_PARALLEL:-1}"
+      - --n-gpu-layers
+      - "999"
+      - --metrics
+      - --port
+      - "8080"

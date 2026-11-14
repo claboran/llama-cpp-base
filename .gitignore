@@ -1,0 +1,11 @@
+# model weights (large, downloaded separately)
+models/
+*.gguf
+
+# local env / secrets
+.env
+
+# build artefacts & caches
+build/
+.cache/
+*.log
