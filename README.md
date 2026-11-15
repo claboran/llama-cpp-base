@@ -26,6 +26,7 @@ Results per tested combination are in [COMPAT.md](COMPAT.md).
 - [Using the API](#using-the-api)
 - [Security](#security)
 - [Performance](#performance)
+- [Competitor: Qwen3.8-27B](#competitor-qwen38-27b)
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
 - [Repository layout](#repository-layout)
@@ -266,6 +267,69 @@ docker run --rm --gpus all -v ./models:/models:ro llama-cpp-base:v1.0.0-cuda13.0
   llama-bench -m /models/google_gemma-4-26B-A4B-it-Q4_K_M.gguf -ngl 999 -fa 1 -d 0,16384
 ```
 
+## Competitor: Qwen3.8-27B
+
+[Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) runs as a separate stack next to Gemma, for
+side-by-side evaluation. It is a **dense** model (all 27B parameters active per token, vs. ~4B for
+Gemma 4 26B-A4B), so plain generation is much slower. Its GGUF includes **MTP (Multi-Token
+Prediction) layers**, which llama.cpp uses as a built-in draft model for speculative decoding; this
+is enabled by default and recovers most of the gap.
+
+```bash
+make models-qwen    # bartowski/Qwen3.8-27B-GGUF, Q4_K_M, 17.4 GB (not part of `make models`)
+make smoke-qwen     # smoke test with the Qwen model as chat model
+make up-qwen        # API + web UI on http://<host>:8098, alias qwen3.8-27b
+make logs-qwen
+make down-qwen
+make bench-compare  # identical llama-bench run on the Gemma and Qwen GGUFs
+```
+
+[`compose.qwen.yaml`](compose.qwen.yaml) `extends` the `llm-chat` service (same image, GPU,
+volumes, API key and CORS) and only changes model, port and server options. It has its own
+project name (`llama-cpp-qwen`), so it starts and stops independently of `compose.yaml`.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `QWEN_MODEL` | `Qwen3.8-27B-Q4_K_M.gguf` | model file |
+| `QWEN_ALIAS` | `qwen3.8-27b` | model name reported by the API |
+| `QWEN_CTX` | `65536` | context size (native maximum 262144) |
+| `QWEN_PARALLEL` | `1` | parallel slots (each slot needs its own KV cache) |
+| `QWEN_CACHE_TYPE` | `f16` | KV cache type; `q8_0` saves ~1.7 GB and was not slower |
+| `QWEN_SPEC_TYPE` | `draft-mtp` | speculative decoding via the MTP layers; `none` disables it |
+| `QWEN_DRAFT_N` | `4` | max draft tokens per step |
+| `QWEN_BIND` / `QWEN_PORT` | `0.0.0.0` / `8098` | host address and port |
+
+Measured on GB10, llama.cpp `v1.0.0`, Q4_K_M, 64k context, flash attention on.
+
+`llama-bench` (tokens per second, no speculative decoding):
+
+| Model | Prompt (512 tokens) | Generation | Prompt @ 16k context | Generation @ 16k context |
+|-------|--------------------:|-----------:|---------------------:|-------------------------:|
+| Gemma 4 26B-A4B Q4_K_M | 3167 | 69.8 | 2568 | 60.5 |
+| Qwen3.8-27B Q4_K_M | 905 | 11.6 | 736 | 10.7 |
+
+`llama-server` generation with MTP (temperature 0, thinking off, one slot; memory via `nvidia-smi`):
+
+| Setting | Code (768 tokens) | Prose (~450 tokens) | Draft acceptance code / prose | Memory |
+|---------|------------------:|--------------------:|------------------------------:|-------:|
+| no speculative decoding | 10.5 | 10.5 | – | 20.4 GB |
+| MTP, `QWEN_DRAFT_N=2` | 26.9 | 22.1 | 93% / 67% | 21.4 GB |
+| **MTP, `QWEN_DRAFT_N=4` (default)** | 36.6 | 27.3 | 88% / 56% | 21.7 GB |
+| MTP, `QWEN_DRAFT_N=8` | 45.0 | 24.0 | 69% / 31% | 22.3 GB |
+| MTP, `QWEN_DRAFT_N=4`, `QWEN_CACHE_TYPE=q8_0` | 40.0 | 28.0 | 86% / 53% | 20.0 GB |
+
+Notes:
+
+- More draft tokens help on predictable output (code) and hurt on free text, because more
+  guesses get rejected. 4 is the best all-rounder; benchmark with your own prompts.
+- Hybrid attention: only 16 of the 64 layers keep a KV cache (~64 KiB per token at f16, ~4 GiB
+  for 64k), so long contexts are cheap. Up to the native 262k no RoPE/YaRN scaling is needed.
+- Larger micro-batches do not speed up prompt processing on GB10 (8k prompt at `-ub` 512 / 2048
+  / 4096: 860 / 833 / 778 t/s), so the default is kept.
+- Qwen3.8 thinks by default, like Gemma 4 (same `enable_thinking` switch, see [Chat](#chat)).
+- Without `--spec-type draft-mtp` the log warns `unused tensor blk.64.nextn.*`. That is the MTP
+  head and harmless.
+
 ## Testing
 
 `make smoke` (or `scripts/smoke-test.sh <tag>`) runs, using plain `docker run` and temporary
@@ -278,7 +342,7 @@ ports 18080/18081 on localhost:
 5. Chat server answers a question correctly
 6. Embedding server returns 1024-dim normalized vectors with sensible similarities
 
-Steps 4–6 are skipped if the model files are missing. Record new results in
+`make smoke-qwen` runs the same test with the Qwen model as chat model. Steps 4–6 are skipped if the model files are missing. Record new results in
 [COMPAT.md](COMPAT.md).
 
 ## Troubleshooting
@@ -310,8 +374,9 @@ NVIDIA Container Toolkit. Make sure `CUDA_ARCHS` matches your GPU.
 ```
 ├── Dockerfile               # multistage: build → base → server
 ├── compose.yaml             # llm-chat and llm-embed services
+├── compose.qwen.yaml        # llm-qwen competitor (extends llm-chat)
 ├── .env.example             # configuration template (copy to .env)
-├── Makefile                 # pull / build / models / smoke / up / down / logs
+├── Makefile                 # pull / build / models / smoke / up / down / logs, *-qwen, bench-compare
 ├── scripts/
 │   ├── download-models.sh   # resumable, checksum-verified GGUF download
 │   └── smoke-test.sh        # test drive
@@ -329,3 +394,4 @@ come with their own licenses:
 - NVIDIA CUDA container images: [NVIDIA Deep Learning Container License](https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license)
 - Gemma 4: see the [model card](https://huggingface.co/google/gemma-4-26B-A4B-it) for its terms of use
 - bge-m3: [MIT](https://huggingface.co/BAAI/bge-m3)
+- Qwen3.8-27B: [Apache 2.0](https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/LICENSE)
