@@ -44,12 +44,12 @@ if [[ -f "$MODELS/$CHAT_MODEL" ]]; then
   step "5. chat server ($CHAT_MODEL, ctx $CHAT_CTX)"
   docker rm -f smoke-chat >/dev/null 2>&1
   docker run -d --name smoke-chat --gpus all -v "$MODELS:/models:ro" -p 127.0.0.1:18080:8080 "$SERVER" \
-    -m "/models/$CHAT_MODEL" -c "$CHAT_CTX" -ngl 999 -fa on --jinja --alias gemma >/dev/null
+    -m "/models/$CHAT_MODEL" -c "$CHAT_CTX" -ngl 999 -fa on --jinja --alias chat >/dev/null
   if wait_health smoke-chat 18080; then
     resp=$(curl -fsS http://127.0.0.1:18080/v1/chat/completions -H 'Content-Type: application/json' \
-      -d '{"model":"gemma","messages":[{"role":"user","content":"Reply with exactly: the capital of France is Paris."}],"max_tokens":1024,"temperature":0}')
+      -d '{"model":"chat","messages":[{"role":"user","content":"Reply with exactly: the capital of France is Paris."}],"max_tokens":4096,"temperature":0}')
     echo "$resp" | python3 -c 'import sys,json; r=json.load(sys.stdin); m=r["choices"][0]["message"]; print("answer:", m["content"]); print("reasoning chars:", len(m.get("reasoning_content") or "")); print("timings:", {k:round(v,1) for k,v in r.get("timings",{}).items() if "per_second" in k})'
-    # Gemma 4 thinks by default: check the final answer, not the reasoning text
+    # Gemma 4 and Qwen3.x think by default: check the final answer, not the reasoning text
     if python3 -c 'import sys,json; sys.exit(0 if "paris" in json.load(sys.stdin)["choices"][0]["message"]["content"].lower() else 1)' <<<"$resp"; then ok chat; else bad "chat answer"; fi
   else bad "chat server not healthy"; docker logs --tail 50 smoke-chat; fi
   docker rm -f smoke-chat >/dev/null

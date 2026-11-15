@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Download GGUF models from Hugging Face into ./models (resumable, sha256-verified).
-# Usage: scripts/download-models.sh [chat|embed|all]   (default: all)
+# Usage: scripts/download-models.sh [chat|embed|qwen|all]   (default: all; qwen is not in all)
 set -euo pipefail
 
 MODELS_DIR="${MODELS_DIR:-$(cd "$(dirname "$0")/.." && pwd)/models}"
@@ -10,6 +10,8 @@ mkdir -p "$MODELS_DIR"
 # repo | file
 CHAT=( "bartowski/google_gemma-4-26B-A4B-it-GGUF" "google_gemma-4-26B-A4B-it-Q4_K_M.gguf" )
 EMBED=( "ggml-org/bge-m3-Q8_0-GGUF" "bge-m3-q8_0.gguf" )
+# competitor under evaluation (not part of "all"), see compose.qwen.yaml
+QWEN=( "bartowski/Qwen3.8-27B-GGUF" "Qwen3.8-27B-Q4_K_M.gguf" )
 
 fetch() {
   local repo="$1" file="$2" dst="$MODELS_DIR/$2"
@@ -33,6 +35,7 @@ fetch() {
 case "${1:-all}" in
   chat)  fetch "${CHAT[@]}" ;;
   embed) fetch "${EMBED[@]}" ;;
+  qwen)  fetch "${QWEN[@]}" ;;
   all)   fetch "${EMBED[@]}"; fetch "${CHAT[@]}" ;;
-  *) echo "usage: $0 [chat|embed|all]" >&2; exit 2 ;;
+  *) echo "usage: $0 [chat|embed|qwen|all]" >&2; exit 2 ;;
 esac
