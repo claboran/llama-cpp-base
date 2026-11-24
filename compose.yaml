@@ -24,6 +24,8 @@ x-llama: &llama
     - ${MODELS_DIR:-./models}:/models:ro
   ulimits:
     memlock: -1
+  # "metrics" lets Prometheus (compose.monitoring.yaml) scrape /metrics by service name
+  networks: [default, metrics]
   environment:
     # Bearer token(s) for the API, comma-separated. Empty = no authentication.
     LLAMA_API_KEY: ${API_KEY:-}
@@ -84,3 +86,10 @@ services:
       - --metrics
       - --port
       - "8080"
+
+networks:
+  # Shared by compose.yaml, compose.qwen.yaml and compose.monitoring.yaml. Created once by
+  # `make network` (or: docker network create llm-metrics); no stack owns or removes it.
+  metrics:
+    name: llm-metrics
+    external: true

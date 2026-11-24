@@ -44,3 +44,10 @@ services:
       - --metrics
       - --port
       - "8080"
+
+networks:
+  # Shared by compose.yaml, compose.qwen.yaml and compose.monitoring.yaml. Created once by
+  # `make network` (or: docker network create llm-metrics); no stack owns or removes it.
+  metrics:
+    name: llm-metrics
+    external: true

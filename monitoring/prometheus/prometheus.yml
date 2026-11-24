@@ -1,0 +1,27 @@
+# Prometheus config for the llama.cpp services (compose.monitoring.yaml).
+# Targets are reached over the shared Docker network "llm-metrics" by service name on the
+# container port 8080, so host ports and *_BIND settings do not matter. Services that are not
+# running show as "down" in Status → Targets; that is expected.
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: llama
+    # /metrics is protected by API_KEY when it is set. The key is handed in via a compose
+    # config (METRICS_API_KEY, default API_KEY, else a placeholder that keyless servers ignore).
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/llama_api_key
+    static_configs:
+      - targets: [llm-chat:8080]
+        labels: {service: chat}
+      - targets: [llm-embed:8080]
+        labels: {service: embed}
+      - targets: [llm-qwen:8080]
+        labels: {service: qwen}
+
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]

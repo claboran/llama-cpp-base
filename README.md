@@ -10,6 +10,7 @@ API services with Docker Compose.
 - Compose services for chat (Gemma 4 26B-A4B) and embeddings (bge-m3), with health checks,
   optional API key and `.env`-based configuration
 - Smoke test script that checks GPU access, benchmarks the model and calls both APIs
+- Optional Prometheus + Grafana stack with a dashboard for throughput, concurrency and queue
 
 Developed and tested on an NVIDIA **GB10** (Grace Blackwell, arm64, compute capability 12.1).
 Results per tested combination are in [COMPAT.md](COMPAT.md).
@@ -27,6 +28,7 @@ Results per tested combination are in [COMPAT.md](COMPAT.md).
 - [Security](#security)
 - [Performance](#performance)
 - [Competitor: Qwen3.8-27B](#competitor-qwen38-27b)
+- [Monitoring](#monitoring)
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
 - [Repository layout](#repository-layout)
@@ -104,7 +106,8 @@ Then:
 - Embeddings API: `http://<host>:8901`
 
 Other targets: `make up-chat`, `make up-embed`, `make logs`, `make down`.
-Without `make`, the same works with `docker build --target base|server …` and
+Without `make`, the same works with `docker build --target base|server …`,
+`docker network create llm-metrics` (once, see [Monitoring](#monitoring)) and
 `docker compose --profile all up -d`.
 
 ### Default models
@@ -233,7 +236,8 @@ By default both services listen on **all interfaces without authentication**. Be
 reachable from an untrusted network:
 
 1. **Set an API key** in `.env`: `API_KEY=$(openssl rand -hex 32)`. Requests without it get
-   `401`; `/health` stays open for health checks.
+   `401`; `/health` stays open for health checks. `/metrics` also needs the key (see
+   [Monitoring](#monitoring)).
 2. **Restrict CORS** (`CORS_ORIGINS`) if browsers on other sites should not call the API.
 3. **Firewall**: ports published by Docker bypass `ufw`/`firewalld` rules on the host. To
    limit access, bind to a specific address (`CHAT_BIND=127.0.0.1` or a VPN/LAN IP) or put a
@@ -330,6 +334,79 @@ Notes:
 - Without `--spec-type draft-mtp` the log warns `unused tensor blk.64.nextn.*`. That is the MTP
   head and harmless.
 
+## Monitoring
+
+All services run with `--metrics`, so llama-server exposes Prometheus metrics on `/metrics`.
+[`compose.monitoring.yaml`](compose.monitoring.yaml) adds Prometheus and Grafana with a
+provisioned dashboard:
+
+```bash
+make up                 # (re)start the llama services, so they join the llm-metrics network
+make up-monitoring      # Prometheus on 127.0.0.1:9090, Grafana on 127.0.0.1:3000 (admin/admin)
+make check-monitoring   # targets scraped, llamacpp:* series present, dashboard provisioned
+make logs-monitoring
+make down-monitoring
+```
+
+From another machine, use an SSH tunnel (`ssh -L 3000:127.0.0.1:3000 <host>`) or set
+`MONITORING_BIND`.
+
+```
+ llm-chat :8080 ─┐
+ llm-embed :8080 ─┼─ network "llm-metrics" ──► prometheus (scrape every 5 s) ──► grafana
+ llm-qwen :8080 ─┘   (shared by all three compose projects)
+```
+
+Prometheus reaches the services by name on the container port, so host ports and `*_BIND`
+do not matter. Services that are not running show as `down` under Status → Targets.
+
+`llm-metrics` is an `external` network in all three compose files, so no stack owns or removes
+it. The `make up*` targets create it if it is missing. Without `make`, create it once with
+`docker network create llm-metrics`, otherwise `docker compose up` stops with
+`network llm-metrics declared as external, but could not be found`.
+
+**Dashboard "llama.cpp"** (Grafana home page, filter by service):
+
+| Row | Panels |
+|-----|--------|
+| Overview | service up, generation tokens/s now, requests processing, requests queued, tokens in range |
+| Throughput | generation tokens/s (all slots), prompt tokens/s (evaluated vs. cached), generation and prompt speed per request, prompt cache hit ratio |
+| Concurrency & queue | requests processing vs. queued, average active slots, busy slots per decode (batching), decode calls/s |
+| Speculative decoding | draft acceptance rate, accepted tokens per draft step (services with `--spec-type`, i.e. qwen) |
+| Context | largest sequence seen (prompt + generation) |
+
+Reading it:
+
+- **Queued > 0** means more concurrent requests than `--parallel` slots (`*_PARALLEL`).
+  Raise the slots if memory allows; each slot gets `ctx / parallel` tokens of context.
+- **Average active slots** close to `*_PARALLEL` means the server is saturated.
+- **Speed per request** falls as more slots share the GPU, while total throughput rises.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `MONITORING_BIND` | `127.0.0.1` | host address for Prometheus and Grafana |
+| `PROMETHEUS_PORT` / `GRAFANA_PORT` | `9090` / `3000` | host ports |
+| `PROMETHEUS_RETENTION` | `30d` | how long metrics are kept |
+| `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` | `admin` / `admin` | Grafana login; change it before exposing Grafana |
+| `METRICS_API_KEY` | *(empty = `API_KEY`)* | bearer token Prometheus sends to `/metrics`; set it if `API_KEY` holds several keys |
+| `PROMETHEUS_VERSION` / `GRAFANA_VERSION` | `v3.16.0` / `13.3.1` | image tags |
+
+Notes:
+
+- `/metrics` requires the API key when `API_KEY` is set. Prometheus sends it automatically.
+  After changing the key, recreate Prometheus (a plain `up` does not pick up the change):
+  `docker compose -f compose.monitoring.yaml --profile monitoring up -d --force-recreate prometheus`.
+- The dashboard is built on counters (`*_total`) and rates. The gauges
+  `llamacpp:prompt_tokens_seconds` and `llamacpp:predicted_tokens_seconds` are reset by **every**
+  read of `/metrics`, so they are wrong as soon as anything else (another scraper, a manual
+  `curl`) reads the endpoint. The same applies to `llamacpp:n_busy_slots_per_decode`, which is
+  used in one panel.
+- llama-server (as of `v1.0.0`) exports no latency histograms (time to first token, request
+  duration) and no KV cache usage. These would need a proxy in front of the server.
+- After bumping `LLAMA_CPP_REF`, run `make check-monitoring`: it fails if metric names changed.
+- The dashboard can be edited in Grafana, but the provisioned file can overwrite those changes.
+  To keep them, export the JSON to `monitoring/grafana/dashboards/llama-cpp.json`.
+
 ## Testing
 
 `make smoke` (or `scripts/smoke-test.sh <tag>`) runs, using plain `docker run` and temporary
@@ -375,11 +452,16 @@ NVIDIA Container Toolkit. Make sure `CUDA_ARCHS` matches your GPU.
 ├── Dockerfile               # multistage: build → base → server
 ├── compose.yaml             # llm-chat and llm-embed services
 ├── compose.qwen.yaml        # llm-qwen competitor (extends llm-chat)
+├── compose.monitoring.yaml  # Prometheus + Grafana
 ├── .env.example             # configuration template (copy to .env)
-├── Makefile                 # pull / build / models / smoke / up / down / logs, *-qwen, bench-compare
+├── Makefile                 # pull / build / models / smoke / up / down / logs, *-qwen, bench-compare, *-monitoring
 ├── scripts/
 │   ├── download-models.sh   # resumable, checksum-verified GGUF download
-│   └── smoke-test.sh        # test drive
+│   ├── smoke-test.sh        # test drive
+│   └── monitoring-check.sh  # checks Prometheus targets, metrics and the Grafana dashboard
+├── monitoring/
+│   ├── prometheus/          # prometheus.yml (scrape targets)
+│   └── grafana/             # datasource/dashboard provisioning, dashboards/llama-cpp.json
 ├── COMPAT.md                # tested combinations, benchmarks, findings
 ├── PLAN.md                  # original planning notes
 └── models/                  # GGUF files (not in git)
@@ -395,3 +477,5 @@ come with their own licenses:
 - Gemma 4: see the [model card](https://huggingface.co/google/gemma-4-26B-A4B-it) for its terms of use
 - bge-m3: [MIT](https://huggingface.co/BAAI/bge-m3)
 - Qwen3.8-27B: [Apache 2.0](https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/LICENSE)
+- Prometheus: [Apache 2.0](https://github.com/prometheus/prometheus/blob/main/LICENSE)
+- Grafana: [AGPL-3.0](https://github.com/grafana/grafana/blob/main/LICENSE)
