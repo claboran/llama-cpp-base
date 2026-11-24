@@ -1,0 +1,69 @@
+# Prometheus + Grafana for the llama.cpp services (throughput, concurrency, queue).
+#   docker compose -f compose.monitoring.yaml --profile monitoring up -d     (or: make up-monitoring)
+# Prometheus scrapes llama-server's /metrics (enabled with --metrics) of llm-chat, llm-embed and
+# llm-qwen over the shared Docker network "llm-metrics" (created by `make network`), which
+# compose.yaml and compose.qwen.yaml also join. Start order does not matter.
+# Settings: MONITORING_* / GRAFANA_* / PROMETHEUS_* / METRICS_API_KEY in .env.
+#
+# Grafana:    http://127.0.0.1:3000  (dashboard "llama.cpp" in folder "llama.cpp")
+# Prometheus: http://127.0.0.1:9090
+# Both are bound to localhost by default; use an SSH tunnel or set MONITORING_BIND.
+
+name: llama-cpp-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.16.0}
+    profiles: [monitoring]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
+    ports:
+      - "${MONITORING_BIND:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    configs:
+      - source: llama_api_key
+        target: /etc/prometheus/llama_api_key
+    networks: [default, metrics]
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:-13.3.1}
+    profiles: [monitoring]
+    restart: unless-stopped
+    depends_on: [prometheus]
+    ports:
+      - "${MONITORING_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/llama-cpp.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+configs:
+  # Bearer token for /metrics. API_KEY may hold several comma-separated keys; then set
+  # METRICS_API_KEY to one of them. Never let this be empty: Compose then bind-mounts the
+  # project directory (with .env) instead of a file. Servers without API_KEY ignore the
+  # placeholder token.
+  llama_api_key:
+    content: "${METRICS_API_KEY:-${API_KEY:-no-api-key}}"
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  # Shared by compose.yaml, compose.qwen.yaml and compose.monitoring.yaml. Created once by
+  # `make network` (or: docker network create llm-metrics); no stack owns or removes it.
+  metrics:
+    name: llm-metrics
+    external: true

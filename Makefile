@@ -9,11 +9,16 @@ QWEN_MODEL    ?= Qwen3.8-27B-Q4_K_M.gguf
 QWEN_CTX      ?= 65536
 CHAT_MODEL    ?= google_gemma-4-26B-A4B-it-Q4_K_M.gguf
 QWEN_COMPOSE  := docker compose -f compose.qwen.yaml --profile qwen
+MON_COMPOSE   := docker compose -f compose.monitoring.yaml --profile monitoring
 BENCH_ARGS    ?= -ngl 999 -fa 1 -p 512 -n 128 -d 0,16384
 BUILD_ARGS    := --build-arg LLAMA_CPP_REF=$(LLAMA_CPP_REF) --build-arg CUDA_VERSION=$(CUDA_VERSION) --build-arg CUDA_ARCHS=$(CUDA_ARCHS)
 
-.PHONY: pull build build-base build-server models smoke up-chat up-embed up down logs \
-        models-qwen smoke-qwen up-qwen down-qwen logs-qwen bench-compare
+.PHONY: network pull build build-base build-server models smoke up-chat up-embed up down logs \
+        models-qwen smoke-qwen up-qwen down-qwen logs-qwen bench-compare \
+        up-monitoring down-monitoring logs-monitoring check-monitoring
+
+network:  ## shared Docker network for Prometheus scraping (external in all compose files)
+	@docker network inspect llm-metrics >/dev/null 2>&1 || docker network create llm-metrics
 
 pull:   ## pre-pull CUDA base images (with retries; Docker Hub can be flaky)
 	@for img in nvidia/cuda:$(CUDA_VERSION)-devel-ubuntu$(UBUNTU_VERSION) nvidia/cuda:$(CUDA_VERSION)-runtime-ubuntu$(UBUNTU_VERSION); do \
@@ -33,11 +38,11 @@ models:
 smoke:
 	scripts/smoke-test.sh $(TAG)
 
-up-chat:
+up-chat: network
 	docker compose --profile chat up -d
-up-embed:
+up-embed: network
 	docker compose --profile embed up -d
-up:
+up: network
 	docker compose --profile all up -d
 down:
 	docker compose --profile all down
@@ -49,7 +54,7 @@ models-qwen:
 	scripts/download-models.sh qwen
 smoke-qwen:
 	CHAT_MODEL=$(QWEN_MODEL) CHAT_CTX=$(QWEN_CTX) scripts/smoke-test.sh $(TAG)
-up-qwen:
+up-qwen: network
 	$(QWEN_COMPOSE) up -d
 down-qwen:
 	$(QWEN_COMPOSE) down
@@ -60,3 +65,13 @@ bench-compare:  ## same llama-bench run on the Gemma and Qwen GGUFs (stop the se
 	  echo "=== $$m"; \
 	  docker run --rm --gpus all -v $(abspath $(or $(MODELS_DIR),models)):/models:ro llama-cpp-base:$(TAG) \
 	    llama-bench -m /models/$$m $(BENCH_ARGS) || exit 1; done
+
+# --- monitoring: Prometheus + Grafana (compose.monitoring.yaml, localhost:9090 / :3000) ---
+up-monitoring: network
+	$(MON_COMPOSE) up -d
+down-monitoring:
+	$(MON_COMPOSE) down
+logs-monitoring:
+	$(MON_COMPOSE) logs -f --tail 100
+check-monitoring:
+	scripts/monitoring-check.sh
